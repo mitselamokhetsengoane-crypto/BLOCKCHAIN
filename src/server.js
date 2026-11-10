@@ -24,7 +24,6 @@ const authenticate = (req, res, next) => {
 };
 
 // --- HASHING LOGIC ---
-// Deterministic JSON stringify to ensure identical objects always hash the same
 const canonicalStringify = (obj) => {
     return JSON.stringify(obj, Object.keys(obj).sort());
 };
@@ -46,25 +45,18 @@ const getLatestBlock = async () => {
         .limit(1)
         .single();
     
-    if (error && error.code !== "PGRST116") throw error; // PGRST116 means empty table
+    if (error && error.code !== "PGRST116") throw error;
     return data;
 };
 
 const addBlock = async (transactions) => {
     const latestBlock = await getLatestBlock();
     
-    // Setup Genesis or continuation
     const blockNumber = latestBlock ? latestBlock.block_number + 1 : 0;
     const previousHash = latestBlock ? latestBlock.current_hash : "0".repeat(64);
     const timestamp = new Date().toISOString();
 
-    const blockData = {
-        blockNumber,
-        timestamp,
-        transactions,
-        previousHash
-    };
-
+    const blockData = { blockNumber, timestamp, transactions, previousHash };
     const currentHash = calculateHash(blockData);
 
     const { data, error } = await supabase
@@ -84,12 +76,10 @@ const addBlock = async (transactions) => {
 };
 
 // --- ROUTES ---
-
 app.get("/health", (req, res) => {
     res.json({ status: "ok", service: "AgriHerd Custom Chain" });
 });
 
-// Record a new transaction
 app.post("/transactions", authenticate, async (req, res) => {
     try {
         const { recordType, recordRef, data } = req.body;
@@ -100,7 +90,6 @@ app.post("/transactions", authenticate, async (req, res) => {
         const txData = { recordType, recordRef, data, timestamp: new Date().toISOString() };
         const txHash = generateTxHash(txData);
 
-        // 1. Check for duplicates
         const { data: existing } = await supabase
             .from("chain_transactions")
             .select("id")
@@ -108,14 +97,12 @@ app.post("/transactions", authenticate, async (req, res) => {
             .single();
         
         if (existing) {
-            return res.status(409).json({ error: "Transaction already exists on chain" });
+            return res.status(409).json({ error: "Transaction already exists" });
         }
 
-        // 2. Add to a new block
         const block = await addBlock([txData]);
 
-        // 3. Save transaction reference
-        const { data: savedTx, error } = await supabase
+        const { error } = await supabase
             .from("chain_transactions")
             .insert({
                 block_number: block.block_number,
@@ -143,7 +130,6 @@ app.post("/transactions", authenticate, async (req, res) => {
     }
 });
 
-// Get all blocks
 app.get("/blocks", authenticate, async (req, res) => {
     const { data, error } = await supabase
         .from("chain_blocks")
@@ -154,7 +140,6 @@ app.get("/blocks", authenticate, async (req, res) => {
     res.json(data);
 });
 
-// Verify the entire chain
 app.get("/verify-chain", authenticate, async (req, res) => {
     try {
         const { data: blocks, error } = await supabase
@@ -173,7 +158,6 @@ app.get("/verify-chain", authenticate, async (req, res) => {
         for (let i = 0; i < blocks.length; i++) {
             const block = blocks[i];
 
-            // 1. Recalculate hash
             const blockData = {
                 blockNumber: block.block_number,
                 timestamp: block.timestamp,
@@ -188,7 +172,6 @@ app.get("/verify-chain", authenticate, async (req, res) => {
                 break;
             }
 
-            // 2. Check previous hash link
             if (i > 0) {
                 const prevBlock = blocks[i - 1];
                 if (block.previous_hash !== prevBlock.current_hash) {
