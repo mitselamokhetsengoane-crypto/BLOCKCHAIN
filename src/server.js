@@ -36,6 +36,61 @@ const generateTxHash = (txData) => {
     return crypto.createHash("sha256").update(canonicalStringify(txData)).digest("hex");
 };
 
+const verifyBlocks = (blocks) => {
+    if (!blocks || blocks.length === 0) {
+        return { status: "EMPTY", verified: true, message: "No blocks yet" };
+    }
+
+    for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        const blockData = {
+            blockNumber: block.block_number,
+            timestamp: block.timestamp,
+            transactions: block.transactions,
+            previousHash: block.previous_hash
+        };
+        const expectedHash = calculateHash(blockData);
+
+        if (expectedHash !== block.current_hash) {
+            return {
+                status: "TAMPERED",
+                verified: false,
+                totalBlocks: blocks.length,
+                brokenAt: block.block_number,
+                message: `Chain broken at block ${block.block_number}`
+            };
+        }
+
+        if (i > 0 && block.previous_hash !== blocks[i - 1].current_hash) {
+            return {
+                status: "TAMPERED",
+                verified: false,
+                totalBlocks: blocks.length,
+                brokenAt: block.block_number,
+                message: `Chain broken at block ${block.block_number}`
+            };
+        }
+    }
+
+    return {
+        status: "VERIFIED",
+        verified: true,
+        totalBlocks: blocks.length,
+        brokenAt: null,
+        message: "Chain integrity confirmed"
+    };
+};
+
+const loadChainVerification = async () => {
+    const { data: blocks, error } = await supabase
+        .from("chain_blocks")
+        .select("*")
+        .order("block_number", { ascending: true });
+
+    if (error) throw error;
+    return { blocks, result: verifyBlocks(blocks) };
+};
+
 // --- CORE ENGINE ---
 const getLatestBlock = async () => {
     const { data, error } = await supabase
@@ -142,52 +197,32 @@ app.get("/blocks", authenticate, async (req, res) => {
 
 app.get("/verify-chain", authenticate, async (req, res) => {
     try {
-        const { data: blocks, error } = await supabase
-            .from("chain_blocks")
-            .select("*")
-            .order("block_number", { ascending: true });
+        const { result } = await loadChainVerification();
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/verify-record/:transactionHash", authenticate, async (req, res) => {
+    try {
+        const { data: transaction, error } = await supabase
+            .from("chain_transactions")
+            .select("tx_hash,block_number")
+            .eq("tx_hash", req.params.transactionHash)
+            .maybeSingle();
 
         if (error) throw error;
-        if (!blocks || blocks.length === 0) {
-            return res.json({ status: "EMPTY", verified: true, message: "No blocks yet" });
+        if (!transaction) {
+            return res.status(404).json({ error: "Transaction not found on the blockchain." });
         }
 
-        let isValid = true;
-        let brokenAt = null;
-
-        for (let i = 0; i < blocks.length; i++) {
-            const block = blocks[i];
-
-            const blockData = {
-                blockNumber: block.block_number,
-                timestamp: block.timestamp,
-                transactions: block.transactions,
-                previousHash: block.previous_hash
-            };
-            const expectedHash = calculateHash(blockData);
-
-            if (expectedHash !== block.current_hash) {
-                isValid = false;
-                brokenAt = block.block_number;
-                break;
-            }
-
-            if (i > 0) {
-                const prevBlock = blocks[i - 1];
-                if (block.previous_hash !== prevBlock.current_hash) {
-                    isValid = false;
-                    brokenAt = block.block_number;
-                    break;
-                }
-            }
-        }
-
+        const { result } = await loadChainVerification();
         res.json({
-            status: isValid ? "VERIFIED" : "TAMPERED",
-            verified: isValid,
-            totalBlocks: blocks.length,
-            brokenAt,
-            message: isValid ? "Chain integrity confirmed" : `Chain broken at block ${brokenAt}`
+            ...result,
+            transactionHash: transaction.tx_hash,
+            blockNumber: transaction.block_number,
+            verified: result.verified && result.status !== "EMPTY"
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
